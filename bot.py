@@ -6,15 +6,18 @@
 - 슬래시 커맨드로 본인/서버 통계를 조회한다.
 """
 
+import asyncio
 import json
 import logging
 import os
+from datetime import timedelta
 
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
 from db import Database
+from notion import NotionClient
 from timeutils import (
     day_window,
     fmt_duration,
@@ -61,6 +64,18 @@ class StudyBot(discord.Client):
         self.db = Database(config.get("db_path", "data/study.db"))
         self.tree = app_commands.CommandTree(self)
         self._reconciled = False
+
+        # Notion 연동 (선택). enabled + 토큰 + database_id 모두 있어야 활성화.
+        ncfg = config.get("notion") or {}
+        token = os.getenv("NOTION_TOKEN")
+        if ncfg.get("enabled") and token and ncfg.get("database_id"):
+            self.notion = NotionClient(token, ncfg["database_id"], ncfg.get("props"))
+            log.info("Notion 연동 활성화됨.")
+        else:
+            self.notion = None
+            if ncfg.get("enabled"):
+                log.warning("Notion 연동이 켜져 있지만 NOTION_TOKEN 또는 database_id 누락 → 비활성화.")
+
         register_commands(self)
 
     # --- 라이프사이클 ----------------------------------------------------
@@ -75,6 +90,9 @@ class StudyBot(discord.Client):
         else:
             await self.tree.sync()
             log.info("슬래시 커맨드를 글로벌로 동기화했습니다(반영에 시간이 걸릴 수 있음).")
+
+        if self.notion:
+            self.loop.create_task(self.settlement_loop())
 
     async def on_ready(self):
         log.info("로그인: %s (id=%s)", self.user, self.user.id)
@@ -202,6 +220,72 @@ class StudyBot(discord.Client):
         )
         return overlap_seconds(rows, w_start, w_end, now)
 
+    # --- Notion 일일 정산 -----------------------------------------------
+
+    async def settlement_loop(self):
+        """매일 day_boundary_hour 시각에, 방금 끝난 하루를 정산해 Notion으로 전송."""
+        await self.wait_until_ready()
+        while not self.is_closed():
+            now = now_utc()
+            _, w_end = day_window(now, self.boundary, self.tz)  # 다음 경계(=오늘 창의 끝)
+            wait = (w_end - now).total_seconds()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            settle_end = w_end
+            settle_start = settle_end - timedelta(days=1)
+            try:
+                ok, total = await self.run_settlement(settle_start, settle_end)
+                await self._post_settle_summary(settle_start, ok, total)
+            except Exception:
+                log.exception("정산 중 오류")
+            await asyncio.sleep(2)  # 경계 재계산 안정화
+
+    async def run_settlement(self, w_start, w_end):
+        """[w_start, w_end) 하루를 유저별로 집계해 Notion에 기록. (성공수, 대상수) 반환."""
+        if not self.notion:
+            return 0, 0
+        rows = self.db.sessions_in_window(w_start.isoformat(), w_end.isoformat())
+        users = {}
+        for r in rows:
+            u = users.setdefault(r["user_id"], {"name": None, "rows": []})
+            u["rows"].append(r)
+            if r["username"]:
+                u["name"] = r["username"]
+        date_str = w_start.astimezone(self.tz).date().isoformat()
+        ok = 0
+        total = 0
+        for uid, u in users.items():
+            study = overlap_seconds(
+                [r for r in u["rows"] if r["kind"] == "study"], w_start, w_end, w_end)
+            rest = overlap_seconds(
+                [r for r in u["rows"] if r["kind"] == "rest"], w_start, w_end, w_end)
+            if study == 0 and rest == 0:
+                continue
+            total += 1
+            if await self.notion.add_daily_record(u["name"] or str(uid), date_str, study, rest):
+                ok += 1
+        log.info("정산 %s: %d/%d명 Notion 기록", date_str, ok, total)
+        return ok, total
+
+    async def _post_settle_summary(self, w_start, ok, total):
+        ch = self._log_channel()
+        if ch is None or total == 0:
+            return
+        date_str = w_start.astimezone(self.tz).date().isoformat()
+        try:
+            await ch.send(embed=discord.Embed(
+                title="🗓️ 일일 정산 완료",
+                description=f"`{date_str}` · {ok}/{total}명 Notion 기록",
+                color=0xEB459E,
+            ))
+        except discord.DiscordException:
+            pass
+
+    async def close(self):
+        if self.notion:
+            await self.notion.close()
+        await super().close()
+
 
 # --- 슬래시 커맨드 -------------------------------------------------------
 
@@ -274,6 +358,27 @@ def register_commands(bot: "StudyBot"):
             title="🏆 오늘 순공 랭킹", description="\n".join(lines), color=0xFEE75C
         )
         await interaction.response.send_message(embed=embed)
+
+    @bot.tree.command(name="notion_sync",
+                      description="[관리자] 지정한 날의 기록을 Notion으로 수동 전송")
+    @app_commands.describe(days_ago="며칠 전 (1=어제, 0=오늘 현재까지)")
+    async def notion_sync(interaction: discord.Interaction, days_ago: int = 1):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("관리자만 사용할 수 있어요.", ephemeral=True)
+            return
+        if not bot.notion:
+            await interaction.response.send_message(
+                "Notion 연동이 비활성화 상태예요 (config/NOTION_TOKEN 확인).", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        now = now_utc()
+        start_today, _ = day_window(now, bot.boundary, bot.tz)
+        w_start = start_today - timedelta(days=days_ago)
+        w_end = min(w_start + timedelta(days=1), now)  # 오늘(0)이면 현재까지만
+        ok, total = await bot.run_settlement(w_start, w_end)
+        date_str = w_start.astimezone(bot.tz).date().isoformat()
+        await interaction.followup.send(
+            f"`{date_str}` 정산 → {ok}/{total}명 Notion 전송 완료.", ephemeral=True)
 
 
 def main():

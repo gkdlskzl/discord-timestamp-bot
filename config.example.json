@@ -10,5 +10,17 @@
     "111111111111111111": "study",
     "222222222222222222": "study",
     "333333333333333333": "rest"
+  },
+  "notion": {
+    "enabled": false,
+    "database_id": "노션_데이터베이스_ID",
+    "props": {
+      "title": "이름",
+      "date": "날짜",
+      "study_hours": "순공(시간)",
+      "rest_hours": "휴식(시간)",
+      "study_text": "순공",
+      "rest_text": "휴식"
+    }
   }
 }

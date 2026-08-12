@@ -21,6 +21,7 @@
 | `/week` | 최근 7일 순공/휴식 + 일 평균 |
 | `/now` | 지금 진행 중인 내 세션 경과 시간 |
 | `/rank` | 오늘 서버 순공 랭킹 Top 10 |
+| `/notion_sync` | [관리자] 지정한 날 기록을 Notion으로 수동 전송 (`days_ago` 1=어제, 0=오늘) |
 
 ## 1. 디스코드 개발자 포털 설정
 
@@ -94,6 +95,51 @@ SELECT SUM(duration_sec)/3600.0 AS hours
 FROM sessions WHERE user_id = ? AND kind = 'study' AND end_utc IS NOT NULL;
 ```
 
-## 로드맵
+## Phase 3: Notion 연동 (선택)
 
-- Phase 3: 매일 자정 정산 → **Notion** 대시보드 자동 전송 (예정)
+매일 `day_boundary_hour` 시각에 방금 끝난 하루를 유저별로 정산해서 Notion DB에
+한 행씩 자동 추가한다. 자정 경계도 반영되어 그날 몫만 집계된다.
+
+### 1) Notion 준비
+1. https://www.notion.so/my-integrations → **New integration** →
+   이름 지정 → **Internal Integration Secret** 복사 (`.env`의 `NOTION_TOKEN`)
+2. Notion에서 **데이터베이스(표)** 하나 생성. 아래 프로퍼티(컬럼)를 **이름·타입 정확히** 맞춰 생성:
+
+   | 프로퍼티 이름 | 타입 |
+   |---|---|
+   | `이름` | 제목(Title) |
+   | `날짜` | 날짜(Date) |
+   | `순공(시간)` | 숫자(Number) |
+   | `휴식(시간)` | 숫자(Number) |
+   | `순공` | 텍스트(Text) |
+   | `휴식` | 텍스트(Text) |
+
+   > 컬럼명을 바꾸고 싶으면 `config.json`의 `notion.props`에서 매핑하면 된다.
+   > 불필요한 컬럼은 `props`에서 빼면 그 항목은 전송하지 않는다.
+3. 그 데이터베이스 우상단 **••• → Connections(연결) → 만든 Integration 추가**
+   (이걸 안 하면 봇이 DB에 못 씀 → 권한 오류)
+4. 데이터베이스 **ID** 복사: DB를 풀페이지로 열고 URL의
+   `notion.so/<워크스페이스>/<32자리 ID>?v=...` 에서 `<32자리 ID>` 부분.
+
+### 2) 설정
+- `.env` 에 `NOTION_TOKEN=secret_...`
+- `config.json` 의 `notion` 블록:
+  ```json
+  "notion": {
+    "enabled": true,
+    "database_id": "여기에_32자리_DB_ID",
+    "props": { "title": "이름", "date": "날짜",
+               "study_hours": "순공(시간)", "rest_hours": "휴식(시간)",
+               "study_text": "순공", "rest_text": "휴식" }
+  }
+  ```
+
+### 3) 적용 & 확인
+```bash
+docker compose restart
+```
+- 관리자 계정에서 `/notion_sync days_ago:0` 실행 → Notion DB에 오늘치 행이 생기면 성공.
+- 이후 매일 `day_boundary_hour` 시각에 전날치가 자동으로 쌓인다.
+
+> Notion을 끄고 싶으면 `notion.enabled`를 `false`로. 봇의 나머지 기능은 그대로 동작한다.
+> 봇이 꺼져 있어 놓친 날은 `/notion_sync days_ago:N`으로 수동 백필 가능.

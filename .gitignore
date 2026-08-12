@@ -1,0 +1,15 @@
+# secrets / local config
+.env
+config.json
+
+# data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

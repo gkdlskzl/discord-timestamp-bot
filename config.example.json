@@ -1,0 +1,14 @@
+{
+  "guild_id": 000000000000000000,
+  "log_channel_id": 000000000000000000,
+  "timezone": "Asia/Seoul",
+  "day_boundary_hour": 0,
+  "db_path": "data/study.db",
+  "post_on_join": false,
+  "post_on_leave": true,
+  "channels": {
+    "111111111111111111": "study",
+    "222222222222222222": "study",
+    "333333333333333333": "rest"
+  }
+}

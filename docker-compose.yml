@@ -1,0 +1,12 @@
+services:
+  study-bot:
+    build: .
+    container_name: study-timer-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+    # 라즈베리파이 리소스 상한(넉넉함, 사실상 안 걸림)
+    mem_limit: 256m
+    cpus: 0.5

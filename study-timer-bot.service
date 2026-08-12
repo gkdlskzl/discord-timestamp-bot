@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord Study Timer Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 아래 경로/유저는 라즈베리파이 환경에 맞게 수정하세요.
+WorkingDirectory=/home/pi/discord-timestamp-bot
+ExecStart=/home/pi/discord-timestamp-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target
